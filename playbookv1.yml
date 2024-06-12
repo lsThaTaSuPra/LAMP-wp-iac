@@ -1,0 +1,271 @@
+---
+
+
+- name: lamp-http
+  hosts: webservers
+  tasks:
+
+    - name: install apache
+      dnf:
+        name: httpd
+        state: present
+      become: true
+    
+    - name: Create document root
+      file:
+        path: "/var/www/html"
+        state: directory
+        mode: '0755'
+      become: true
+
+    - name: transfer ownership to apache
+      ansible.builtin.file:
+        path: /var/www/html/
+        owner: apache
+        group: apache
+        recurse: true
+      become: true
+
+    - name: replace line
+      lineinfile: 
+        path: /etc/httpd/conf/httpd.conf
+        regexp: '^(.*)DocumentRoot "/var/www/html"(.*)$' 
+        line: 'DocumentRoot "/var/www/html/wordpress"'
+        backrefs: yes
+      become: true
+
+    - name: replace another line 
+      lineinfile: 
+        path: /etc/httpd/conf/httpd.conf
+        regexp: '^(.*)<Directory "/var/www/html">(.*)$' 
+        line: '<Directory "/var/www/html/wordpress">'
+        backrefs: yes
+      become: true
+
+    - name: Add section in the conf file
+      blockinfile:
+        path: /etc/httpd/conf/httpd.conf
+        block: |
+            DirectoryIndex index.php
+            AllowOverride FileInfo
+            FallbackResource /index.php
+          
+        insertafter: <Directory "/var/www/html/wordpress">
+        marker: "# {mark} ANSIBLE MANAGED BLOCK directory "
+      become: true
+
+    - name: Add another section in the conf file
+      blockinfile:
+        path: /etc/httpd/conf/httpd.conf
+        block: |
+          AddHandler php-script .php
+        insertafter: EOF
+        marker: "# {mark} ANSIBLE MANAGED EOF"
+      become: true
+
+- name: firewall
+  hosts: webservers
+  tasks:
+    - name: enable http
+      ansible.posix.firewalld:
+        service: http
+        permanent: true
+        state: enabled
+      become: true
+
+    - name: enable https
+      ansible.posix.firewalld:
+        service: https
+        permanent: true
+        state: enabled
+      become: true
+    
+    
+- name: lamp-bd
+  hosts: dbservers
+  vars: 
+    mysql_superuser: administrator
+    mysql_superuser_password: 14;suidos;44
+  tasks:
+    - name: install mysql
+      dnf:
+        name: mysql-server
+        state: present
+      become: true
+
+    - name: start mysql
+      service:
+        name: mysqld
+        state: started
+        enabled: true
+      become: true
+
+    - name: Install pip
+      dnf:
+        name: python3-pip
+        state: present
+      become: true
+
+    - name: Install PyMySQL
+      pip:
+        name: pymysql
+        state: present
+      become: true
+
+    - name: Install cryptography
+      dnf:
+        name: python3-cryptography
+        state: present
+      become: true
+
+    - name: Ensure MySQL root password is set
+      community.mysql.mysql_user:
+        name: administrator
+        host: "{{item}}"
+        password: "{{ mysql_superuser_password }}"
+        check_implicit_admin: true
+      with_items: 
+        - "127.0.0.1"
+        - "localhost"
+        - "::1"
+      become: true
+
+    - name: Create MySQL database
+      community.mysql.mysql_db:
+        name: testdb
+        state: present
+      become: true
+
+
+- name: lamp-php
+  hosts: phpservers
+  become: true
+  tasks:
+    
+    - name: reset PHP  module
+      ansible.builtin.shell: 
+        cmd: dnf module reset php -y
+
+    - name: disable PHP  module
+      ansible.builtin.shell: 
+        cmd: dnf module disable php -y
+    
+    - name: Install EPEL release
+
+      ansible.builtin.dnf:
+        name: https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
+        state: present
+      when: ansible_facts.distribution_major_version == "9"
+
+    - name: install repo EPEL
+      become: true
+      dnf:
+        name: https://rpms.remirepo.net/enterprise/remi-release-9.rpm
+        disable_gpg_check: true
+      when: ansible_facts.distribution_major_version == "9"
+
+    - name: Enable PHP 7.4 module
+      ansible.builtin.shell: 
+        cmd: dnf module install php:remi-7.4 -y
+      when: ansible_facts.distribution_major_version == "9"
+
+    - name: Enable PHP 7.4 module
+      ansible.builtin.shell: 
+        cmd: dnf module install php:7.4 -y
+      when: ansible_facts.distribution_major_version == "8"
+
+    - name: Install PHP 7.4 and required extensions
+      dnf:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - php
+        - php-common
+        - php-cli
+        - php-mysqlnd
+        - php-gd
+        - php-xml
+        - php-mbstring
+        - php-json
+
+
+- name: wordpress
+  hosts: webservers
+  tasks:
+
+    - name: Download and unpack latest WordPress
+      unarchive:
+        src: https://wordpress.org/latest.tar.gz
+        dest: "/var/www/html"
+        remote_src: yes
+        creates: "/var/www/html/wordpress"
+      become: true
+
+    - name: Set permissions for directories
+      shell: "/usr/bin/find /var/www/html/wordpress/ -type d -exec chmod 750 {} \\;"
+      become: true
+
+    - name: Set permissions for files
+      shell: "/usr/bin/find /var/www/html/wordpress/ -type f -exec chmod 640 {} \\;"
+      become: true
+
+
+- name: Manage MySQL users and privileges
+  hosts: dbservers  
+  vars:
+    db_name: "testdb"
+    db_user: "test"
+    db_password: "Password_123"
+
+  tasks:
+
+    - name: Create MySQL user
+      mysql_user:
+        name: "{{ db_user }}"
+        host: localhost
+        password: "{{ db_password }}"
+        priv: "{{ db_name }}.*:ALL"
+      become: true
+
+    - name: Grant all privileges on the database
+      mysql_user:
+        name: "{{ db_user }}"
+        host: localhost
+        priv: "{{ db_name }}.*:ALL"
+      become: true
+
+    - name: send in wp-conf
+      template:
+        src: wp-config.php.j2
+        dest: /var/www/html/wordpress/wp-config.php
+        force: true
+      become: true
+
+
+- name:  Restart all services
+  hosts: webservers
+  tasks: 
+
+    - name : start apache
+      service:
+        name: httpd
+        state: started
+      become: true
+
+    - name : start fpm
+      service:
+        name: php-fpm
+        state: started
+      become: true
+
+    - name: reload firewall
+      service:
+        name: firewalld
+        state: reloaded
+      become: true 
+
+    - name: reload httpd
+      service:
+        name: httpd
+        state: reloaded
+      become: true 
