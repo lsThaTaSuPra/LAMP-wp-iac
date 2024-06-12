@@ -85,7 +85,7 @@
   hosts: dbservers
   vars: 
     mysql_superuser: administrator
-    mysql_superuser_password: 14;suidos;44
+    mysql_superuser_password: youradminpwd
   tasks:
     - name: install mysql
       dnf:
